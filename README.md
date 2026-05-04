@@ -118,6 +118,17 @@ The mnemonic phrase is copied into a [`Zeroizing`](https://docs.rs/zeroize) buff
 
 Do not run this wallet on a shared or untrusted machine.
 
+### Built-in Hardening Features
+
+This wallet includes several proactive safety mechanisms designed to prevent common operational errors and ensure transaction validity:
+
+- **Strict Fee Ceilings**: Calculates the effective fee (`inputs - outputs`) before signing. If the fee exceeds `10,000,000` satoshis (0.1 BTC), the transaction is immediately aborted to prevent catastrophic fee overpayments.
+- **Dust Protection**: Scans all outputs before signing. If any output is below the standard `546` satoshi dust limit, the transaction is rejected, preventing network rejection and wasted effort.
+- **Always-On RBF**: Opt-in Replace-By-Fee (BIP 125) is signaled on **every** transaction by default, allowing users to bump stuck transactions later.
+- **Guaranteed Finalization**: Belt-and-suspenders validation ensures that every input has valid witness data or script-sig immediately after signing. Unsigned or partially signed PSBTs will never be accidentally broadcast.
+- **Zero Panics**: The codebase is strictly linted (`#![deny(clippy::unwrap_used)]`, `panic`, `expect_used`, `indexing_slicing`, `arithmetic_side_effects`) to guarantee deterministic error handling over panics.
+- **Adversarial Tested**: Validated against property-based fuzzing (using `proptest`) for extreme boundary values (e.g., sending exact balance amounts, `f32::MAX` fee rates, NaN fee rates) to ensure the wallet handles unexpected inputs gracefully.
+
 ### MemoryDatabase — No Encryption
 
 UTXO data, transaction history, and derived addresses are stored in BDK's `MemoryDatabase` (an in-process hash map). This data:
