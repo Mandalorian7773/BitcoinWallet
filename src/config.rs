@@ -60,6 +60,7 @@ impl From<NetworkArg> for Network {
 ///
 /// assert_eq!(electrum_url(Network::Testnet), "ssl://electrum.blockstream.info:60002");
 /// ```
+#[must_use]
 pub fn electrum_url(network: Network) -> &'static str {
     match network {
         Network::Bitcoin => MAINNET_ELECTRUM_URL,

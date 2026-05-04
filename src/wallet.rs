@@ -21,27 +21,69 @@ use crate::config::electrum_url;
 /// network/backend failures without parsing display strings.
 #[derive(Debug, Error)]
 pub enum WalletError {
-    #[error("invalid mnemonic phrase: {0}")]
+    /// The BIP39 mnemonic phrase is syntactically or semantically invalid.
+    ///
+    /// Common causes: wrong word count, a word not in the BIP39 word list,
+    /// or an invalid checksum.
+    #[error("Invalid mnemonic phrase — please check each word and its position. Detail: {0}")]
     InvalidMnemonic(String),
-    #[error("insufficient confirmed balance: have {available} sats, need {required} sats")]
+
+    /// The wallet does not hold enough confirmed satoshis to fund the send.
+    ///
+    /// `available` is the current confirmed balance; `required` is the
+    /// minimum needed (send amount, before fees).
+    #[error(
+        "Insufficient confirmed balance: the wallet holds {available} sats \
+         but {required} sats are required."
+    )]
     InsufficientFunds { available: u64, required: u64 },
-    #[error("invalid recipient address: {0}")]
+
+    /// The recipient address string could not be parsed or belongs to the
+    /// wrong network.
+    #[error("Invalid recipient address — {0}")]
     InvalidAddress(String),
-    #[error("network error: {0}")]
+
+    /// A network or Electrum backend error occurred.
+    ///
+    /// These are typically transient (server unreachable, timeout) but some
+    /// indicate configuration problems (wrong Electrum URL).
+    #[error("Network error — {0}")]
     NetworkError(String),
-    #[error("transaction signing failed: {0}")]
+
+    /// The transaction could not be signed or finalized.
+    ///
+    /// This usually means the wallet descriptor does not control the UTXOs
+    /// being spent, or the signing key is missing.
+    #[error("Transaction signing failed — {0}")]
     SigningFailed(String),
+
+    /// A transaction output is below the P2WPKH dust limit (546 sats).
+    ///
+    /// Bitcoin nodes will not relay dust outputs; reduce the send amount or
+    /// choose a higher value so that the change output is above the limit.
+    #[error(
+        "Transaction output of {value} sats is below the 546-sat dust limit. \
+         Increase the send amount or use send-max."
+    )]
+    DustOutput { value: u64 },
+
+    /// The computed transaction fee exceeds 0.1 BTC (10,000,000 sats).
+    ///
+    /// This is a safety cap to prevent accidental overpayment. Lower the
+    /// fee rate or ensure the UTXO set is correctly synced.
+    #[error(
+        "Computed fee of {fee_sats} sats exceeds the 10,000,000-sat safety ceiling. \
+         Lower the fee rate or verify your UTXO set."
+    )]
+    FeeTooHigh { fee_sats: u64 },
 }
 
 /// Generate a new 12-word English BIP39 mnemonic.
 ///
-/// # Arguments
+/// # Errors
 ///
-/// This function does not take arguments.
-///
-/// # Returns
-///
-/// A new BDK BIP39 mnemonic on success.
+/// Returns [`WalletError::InvalidMnemonic`] if the BDK random-number
+/// generator fails (extremely unlikely in practice).
 ///
 /// # Example
 ///
@@ -57,16 +99,20 @@ pub fn generate_mnemonic() -> Result<Mnemonic, WalletError> {
     Ok(generated.into_key())
 }
 
-/// Create an in-memory BIP84 wallet from a mnemonic.
+/// Create an in-memory BIP84 wallet from a mnemonic phrase.
 ///
 /// # Arguments
 ///
-/// * `mnemonic` - A BIP39 mnemonic phrase.
-/// * `network` - Bitcoin network for descriptors and address encoding.
+/// * `mnemonic` — A valid BIP39 mnemonic phrase (12 or 24 words).
+/// * `network` — Bitcoin network for descriptors and address encoding.
 ///
-/// # Returns
+/// # Errors
 ///
-/// A BDK wallet backed by [`MemoryDatabase`].
+/// Returns [`WalletError::InvalidMnemonic`] if the phrase cannot be parsed
+/// or the extended private key cannot be derived.
+///
+/// Returns [`WalletError::NetworkError`] if the BIP84 descriptor templates
+/// cannot be built or the BDK wallet cannot be constructed.
 ///
 /// # Example
 ///
@@ -110,12 +156,13 @@ pub fn create_wallet(
 ///
 /// # Arguments
 ///
-/// * `wallet` - In-memory wallet to update.
-/// * `network` - Network used to choose the Electrum endpoint.
+/// * `wallet` — In-memory wallet to update.
+/// * `network` — Network used to choose the Electrum endpoint.
 ///
-/// # Returns
+/// # Errors
 ///
-/// The connected Electrum backend, ready for broadcasting.
+/// Returns [`WalletError::NetworkError`] if the Electrum connection fails or
+/// the wallet sync request times out.
 ///
 /// # Example
 ///
@@ -149,15 +196,16 @@ pub fn sync_wallet(
     Ok(blockchain)
 }
 
-/// Return the wallet balance from the local BDK database.
+/// Return the wallet balance from the local BDK in-memory database.
 ///
 /// # Arguments
 ///
-/// * `wallet` - Wallet whose cached balance should be read.
+/// * `wallet` — Wallet whose cached balance should be read.
 ///
-/// # Returns
+/// # Errors
 ///
-/// BDK balance buckets for confirmed, pending, and immature sats.
+/// Returns [`WalletError::NetworkError`] if the BDK database query fails
+/// (should not occur with `MemoryDatabase` under normal conditions).
 ///
 /// # Example
 ///
@@ -180,11 +228,12 @@ pub fn get_balance(wallet: &Wallet<MemoryDatabase>) -> Result<bdk::Balance, Wall
 ///
 /// # Arguments
 ///
-/// * `wallet` - Wallet whose external keychain should advance.
+/// * `wallet` — Wallet whose external keychain should advance.
 ///
-/// # Returns
+/// # Errors
 ///
-/// A network-encoded BIP84 receive address.
+/// Returns [`WalletError::NetworkError`] if the BDK key derivation or
+/// database write fails.
 ///
 /// # Example
 ///

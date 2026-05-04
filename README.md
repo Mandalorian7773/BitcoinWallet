@@ -89,3 +89,45 @@ All commands support a `--json` flag to output the result in JSON format, which 
 ```bash
 cargo run -- --json generate
 ```
+
+## Security Considerations
+
+> **This wallet is a learning tool — not production software.**
+
+### Why Testnet Is the Default
+
+Bitcoin Testnet coins have no monetary value. Running on Testnet by default means that configuration mistakes, bad fee rates, and accidental sends can never cost real money. Switch to `--network mainnet` only when you explicitly intend to use real funds.
+
+### What `--confirm` Protects Against
+
+Any mainnet send above **1 000 000 satoshis (0.01 BTC)** requires the `--confirm` flag to be passed explicitly:
+
+```bash
+cargo run -- --network mainnet send --mnemonic "..." <ADDRESS> 2000000 2.0 --confirm
+```
+
+Without `--confirm`, the CLI aborts before constructing the transaction. This prevents accidents caused by a misplaced decimal point, wrong units, or a copy-paste error in the amount field.
+
+### Mnemonic Handling
+
+The mnemonic phrase is copied into a [`Zeroizing`](https://docs.rs/zeroize) buffer immediately on receipt, which overwrites the secret memory when the buffer is dropped. This limits the window during which the raw phrase lives in process memory. However:
+
+- The phrase **is** present in plaintext on the CLI argument list (visible to `ps` / process monitors) for the lifetime of the command.
+- The BIP32 extended private key is held in memory for the duration of the command and is not separately zeroized.
+- No swap-file or core-dump protections are applied.
+
+Do not run this wallet on a shared or untrusted machine.
+
+### MemoryDatabase — No Encryption
+
+UTXO data, transaction history, and derived addresses are stored in BDK's `MemoryDatabase` (an in-process hash map). This data:
+
+- Is **not encrypted** at rest.
+- Is **not persisted** to disk between runs — the wallet re-derives everything from the mnemonic on each invocation.
+- Could be read by another process with sufficient OS privileges while the command is running.
+
+### BDK Security Notes
+
+This wallet builds on the [Bitcoin Dev Kit](https://bitcoindevkit.org). Consult the BDK project's own security documentation and responsible-disclosure policy before using any BDK-based software in a sensitive context:
+
+👉 <https://bitcoindevkit.org>

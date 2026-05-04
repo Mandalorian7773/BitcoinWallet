@@ -1,3 +1,10 @@
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::panic)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::indexing_slicing)]
+#![deny(clippy::arithmetic_side_effects)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
 use anyhow::{Context, Result};
 use bdk::bitcoin::Network;
 use bitcoin_wallet::{config::NetworkArg, transaction, wallet};
@@ -53,7 +60,34 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+/// Entry point.
+///
+/// Delegates to [`run`] and converts any error into a structured stderr
+/// message plus a POSIX exit code 1, so callers can always rely on both
+/// the exit code and non-empty stderr to detect failures.
+fn main() {
+    if let Err(err) = run() {
+        // Short, user-facing summary on the first line.
+        eprintln!("Error: {err}");
+
+        // Full anyhow cause chain indented underneath.
+        let chain: Vec<_> = err.chain().skip(1).collect();
+        if !chain.is_empty() {
+            eprintln!();
+            eprintln!("Caused by:");
+            for cause in chain {
+                eprintln!("  {cause}");
+            }
+        }
+
+        std::process::exit(1);
+    }
+}
+
+/// All application logic, returning `anyhow::Result<()>` so every `?`
+/// automatically gets the full context chain printed by `main`.
+#[allow(clippy::too_many_lines)]
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let network: Network = cli.network.into();
 
@@ -85,19 +119,30 @@ fn main() -> Result<()> {
             }
             let bal = wallet::get_balance(&w).context("read wallet balance")?;
             if cli.json {
+                let unconf_pending =
+                    bal.untrusted_pending.saturating_add(bal.trusted_pending);
+                let total = bal.confirmed.saturating_add(unconf_pending);
                 println!(
                     "{}",
                     json!({
                         "confirmed_sats": bal.confirmed,
-                        "unconfirmed_sats": bal.untrusted_pending + bal.trusted_pending,
-                        "total_sats": bal.confirmed + bal.untrusted_pending + bal.trusted_pending,
+                        "unconfirmed_sats": unconf_pending,
+                        "total_sats": total,
                     })
                 );
             } else {
-                let unconfirmed = bal.untrusted_pending + bal.trusted_pending;
-                println!("Confirmed   : {} sats", bal.confirmed);
-                println!("Unconfirmed : {} sats", unconfirmed);
-                println!("Total       : {} sats", bal.confirmed + unconfirmed);
+                let unconfirmed = bal.untrusted_pending.saturating_add(bal.trusted_pending);
+                let total = bal.confirmed.saturating_add(unconfirmed);
+                #[allow(clippy::cast_precision_loss)]
+                let conf_btc = bal.confirmed as f64 / 100_000_000.0;
+                #[allow(clippy::cast_precision_loss)]
+                let unconf_btc = unconfirmed as f64 / 100_000_000.0;
+                #[allow(clippy::cast_precision_loss)]
+                let total_btc = total as f64 / 100_000_000.0;
+                println!("Confirmed:   {bal_confirmed} sats  ({conf_btc:.8} BTC)",
+                    bal_confirmed = bal.confirmed);
+                println!("Unconfirmed: {unconfirmed} sats  ({unconf_btc:.8} BTC)");
+                println!("Total:       {total} sats  ({total_btc:.8} BTC)");
             }
             Ok(())
         }
@@ -139,7 +184,7 @@ fn main() -> Result<()> {
             }
             let txs = w
                 .list_transactions(false)
-                .context("Failed to list transactions")?;
+                .context("list transactions from wallet database")?;
             if txs.is_empty() {
                 println!("No transactions found.");
                 return Ok(());
@@ -148,7 +193,11 @@ fn main() -> Result<()> {
                 let entries: Vec<_> = txs
                     .iter()
                     .map(|tx| {
-                        let net = tx.received as i64 - tx.sent as i64;
+                        // WHY: received and sent are u64; cast to i64 before
+                        // subtraction to represent net direction.
+                        // Values cannot realistically exceed i64::MAX (9.2e18 sats).
+                        #[allow(clippy::cast_possible_wrap)]
+                        let net = (tx.received as i64).wrapping_sub(tx.sent as i64);
                         json!({
                             "txid": tx.txid.to_string(),
                             "received_sats": tx.received,
@@ -167,7 +216,10 @@ fn main() -> Result<()> {
                 );
                 println!("{}", "-".repeat(120));
                 for tx in &txs {
-                    let net = tx.received as i64 - tx.sent as i64;
+                    // WHY: received and sent are u64; cast to i64 before
+                    // subtraction to represent net direction.
+                    #[allow(clippy::cast_possible_wrap)]
+                    let net = (tx.received as i64).wrapping_sub(tx.sent as i64);
                     let status = if tx.confirmation_time.is_some() {
                         "confirmed"
                     } else {
@@ -203,7 +255,7 @@ fn cmd_generate(network: Network, as_json: bool) -> Result<()> {
         for (idx, word) in phrase.split_whitespace().enumerate() {
             // WHY: numbering words makes paper backup verification easier and
             // reduces transposition mistakes during wallet recovery.
-            println!("{:>2}. {word}", idx + 1);
+            println!("{:>2}. {word}", idx.saturating_add(1));
         }
         println!("First address: {addr}");
         println!();
