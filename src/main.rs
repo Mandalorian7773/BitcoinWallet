@@ -1,35 +1,24 @@
-mod config;
-mod transaction;
-mod wallet;
-
 use anyhow::{Context, Result};
 use bdk::bitcoin::Network;
-use clap::{Parser, Subcommand, ValueEnum};
+use bitcoin_wallet::{config::NetworkArg, transaction, wallet};
+use clap::{Parser, Subcommand};
 use serde_json::json;
 
-#[derive(Clone, ValueEnum, Debug)]
-enum NetworkArg {
-    Testnet,
-    Mainnet,
-}
-
-impl From<NetworkArg> for Network {
-    fn from(n: NetworkArg) -> Self {
-        match n {
-            NetworkArg::Testnet => Network::Testnet,
-            NetworkArg::Mainnet => Network::Bitcoin,
-        }
-    }
-}
-
 #[derive(Parser)]
-#[command(name = "wallet", about = "Minimal Bitcoin wallet CLI (BDK 0.29)", version)]
+#[command(
+    name = "wallet",
+    about = "Minimal Bitcoin wallet CLI (BDK 0.29)",
+    version
+)]
 struct Cli {
     #[arg(long, value_enum, default_value = "testnet")]
     network: NetworkArg,
 
     #[arg(long, help = "Output results as JSON")]
     json: bool,
+
+    #[arg(long, help = "Skip network sync for read-only commands")]
+    offline: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -55,6 +44,8 @@ enum Commands {
         address: String,
         sats: u64,
         fee_sat_per_vbyte: f32,
+        #[arg(long, help = "Confirm mainnet sends above 1,000,000 sats")]
+        confirm: bool,
     },
     History {
         #[arg(long)]
@@ -67,16 +58,17 @@ fn main() -> Result<()> {
     let network: Network = cli.network.into();
 
     match cli.command {
-        Commands::Generate => cmd_generate(network, cli.json),
+        Commands::Generate => cmd_generate(network, cli.json).context("run generate command"),
 
         Commands::Restore { mnemonic } => {
             let phrase = mnemonic.join(" ");
-            cmd_restore(&phrase, network, cli.json)
+            cmd_restore(&phrase, network, cli.json).context("run restore command")
         }
 
         Commands::Address { mnemonic } => {
-            let w = wallet::create_wallet(&mnemonic, network)?;
-            let addr = wallet::get_new_address(&w)?;
+            let w = wallet::create_wallet(&mnemonic, network)
+                .context("create wallet for address command")?;
+            let addr = wallet::get_new_address(&w).context("derive receive address")?;
             if cli.json {
                 println!("{}", json!({ "address": addr.to_string() }));
             } else {
@@ -86,9 +78,12 @@ fn main() -> Result<()> {
         }
 
         Commands::Balance { mnemonic } => {
-            let w = wallet::create_wallet(&mnemonic, network)?;
-            let _chain = wallet::sync_wallet(&w, network)?;
-            let bal = wallet::get_balance(&w)?;
+            let w = wallet::create_wallet(&mnemonic, network)
+                .context("create wallet for balance command")?;
+            if !cli.offline {
+                wallet::sync_wallet(&w, network).context("sync wallet before reading balance")?;
+            }
+            let bal = wallet::get_balance(&w).context("read wallet balance")?;
             if cli.json {
                 println!(
                     "{}",
@@ -112,11 +107,21 @@ fn main() -> Result<()> {
             address,
             sats,
             fee_sat_per_vbyte,
+            confirm,
         } => {
-            let w = wallet::create_wallet(&mnemonic, network)?;
-            let chain = wallet::sync_wallet(&w, network)?;
-            let txid =
-                transaction::send(&w, &chain, &address, sats, fee_sat_per_vbyte, network)?;
+            let w = wallet::create_wallet(&mnemonic, network)
+                .context("create wallet for send command")?;
+            let chain = wallet::sync_wallet(&w, network).context("sync wallet before sending")?;
+            let txid = transaction::send(
+                &w,
+                &chain,
+                &address,
+                sats,
+                fee_sat_per_vbyte,
+                network,
+                confirm,
+            )
+            .context("build, sign, and broadcast transaction")?;
             if cli.json {
                 println!("{}", json!({ "txid": txid.to_string() }));
             } else {
@@ -127,9 +132,14 @@ fn main() -> Result<()> {
         }
 
         Commands::History { mnemonic } => {
-            let w = wallet::create_wallet(&mnemonic, network)?;
-            let _chain = wallet::sync_wallet(&w, network)?;
-            let txs = w.list_transactions(false).context("Failed to list transactions")?;
+            let w = wallet::create_wallet(&mnemonic, network)
+                .context("create wallet for history command")?;
+            if !cli.offline {
+                wallet::sync_wallet(&w, network).context("sync wallet before listing history")?;
+            }
+            let txs = w
+                .list_transactions(false)
+                .context("Failed to list transactions")?;
             if txs.is_empty() {
                 println!("No transactions found.");
                 return Ok(());
@@ -151,7 +161,10 @@ fn main() -> Result<()> {
                     .collect();
                 println!("{}", json!(entries));
             } else {
-                println!("{:<64}  {:>12}  {:>12}  {:>10}  {}", "TXID", "RECEIVED", "SENT", "NET", "STATUS");
+                println!(
+                    "{:<64}  {:>12}  {:>12}  {:>10}  STATUS",
+                    "TXID", "RECEIVED", "SENT", "NET"
+                );
                 println!("{}", "-".repeat(120));
                 for tx in &txs {
                     let net = tx.received as i64 - tx.sent as i64;
@@ -172,10 +185,10 @@ fn main() -> Result<()> {
 }
 
 fn cmd_generate(network: Network, as_json: bool) -> Result<()> {
-    let mnemonic = wallet::generate_mnemonic()?;
+    let mnemonic = wallet::generate_mnemonic().context("generate mnemonic")?;
     let phrase = mnemonic.to_string();
-    let w = wallet::create_wallet(&phrase, network)?;
-    let addr = wallet::get_new_address(&w)?;
+    let w = wallet::create_wallet(&phrase, network).context("create generated wallet")?;
+    let addr = wallet::get_new_address(&w).context("derive first generated address")?;
     if as_json {
         println!(
             "{}",
@@ -186,7 +199,12 @@ fn cmd_generate(network: Network, as_json: bool) -> Result<()> {
         );
     } else {
         println!("=== New Wallet ===");
-        println!("Mnemonic     : {phrase}");
+        println!("Mnemonic:");
+        for (idx, word) in phrase.split_whitespace().enumerate() {
+            // WHY: numbering words makes paper backup verification easier and
+            // reduces transposition mistakes during wallet recovery.
+            println!("{:>2}. {word}", idx + 1);
+        }
         println!("First address: {addr}");
         println!();
         println!("IMPORTANT: Back up your mnemonic. It is the only way to recover your funds.");
@@ -195,8 +213,8 @@ fn cmd_generate(network: Network, as_json: bool) -> Result<()> {
 }
 
 fn cmd_restore(phrase: &str, network: Network, as_json: bool) -> Result<()> {
-    let w = wallet::create_wallet(phrase, network)?;
-    let addr = wallet::get_new_address(&w)?;
+    let w = wallet::create_wallet(phrase, network).context("create restored wallet")?;
+    let addr = wallet::get_new_address(&w).context("derive first restored address")?;
     if as_json {
         println!("{}", json!({ "first_address": addr.to_string() }));
     } else {
